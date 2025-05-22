@@ -148,3 +148,7 @@ The files that we'll put in the container are:
 * __`wsgi.py`__ is a small wrapper used to invoke the Flask app. You should be able to take this file as-is.
 
 In summary, the two files you will probably want to change for your application are `train` and `predictor.py`.
+
+# Reference
+
+[deployment reference](https://github.com/aws/amazon-sagemaker-examples/blob/main/advanced_functionality/scikit_bring_your_own/scikit_bring_your_own.ipynb)
