@@ -1,0 +1,956 @@
+#!/usr/bin/env python
+
+# A sample training component that trains a simple scikit-learn decision tree model.
+# This implementation works in File mode and makes no assumptions about the input file names.
+# Input is specified as CSV with a data point in each row and the labels in the first column.
+from __future__ import print_function
+
+from imblearn.over_sampling import RandomOverSampler, SMOTE
+from imblearn.under_sampling import RandomUnderSampler, NearMiss
+from imblearn.pipeline import Pipeline as ImbPipeline
+from IPython.display import display
+
+from lime import lime_tabular
+
+import matplotlib.pyplot as plt
+
+import numpy as np
+
+import os
+
+import pandas as pd
+
+import seaborn as sns
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier, GradientBoostingClassifier
+from sklearn.feature_selection import RFE
+from sklearn.inspection import permutation_importance
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import make_scorer, recall_score, fbeta_score, classification_report, roc_auc_score, confusion_matrix
+from sklearn.model_selection import cross_val_score, GridSearchCV, train_test_split, StratifiedKFold
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.preprocessing import OneHotEncoder, RobustScaler
+from sklearn.tree import DecisionTreeClassifier
+import sys
+
+import traceback
+
+import warnings
+
+from xgboost.sklearn import XGBClassifier
+from xgboost.sklearn import XGBClassifier
+
+warnings.filterwarnings('ignore')
+
+prefix = '/opt/ml/'
+input_path = f'{prefix}input/data'
+output_path = os.path.join(prefix, 'output')
+model_path = os.path.join(prefix, 'model')
+channel_name='training'
+training_path = os.path.join(input_path, channel_name)
+
+# Parameter bucket dan file
+file_key = 'TravelInsurancePrediction.csv'
+# if local
+#data = 'test_local/input/data/training/TravelInsurancePrediction.csv'
+# on prod
+data = os.path.join(training_path, file_key)
+
+
+def train():
+    print('Starting the training.')
+    try:
+        # Load data ke Pandas DataFrame
+        df = pd.read_csv(data)
+        df.rename(columns={'Unnamed: 0': "ID"},inplace=True)
+        print(f"Data shape: {df.shape}")
+        print(f"Data columns: {df.columns}")
+        print(f"Data head: {df.head()}")
+
+        # dataframe information
+        print(f'Total Rows           :', df.shape[0])
+        print(f'Total Columns        :', df.shape[1])
+
+        print('-----------------------------\nData Types Count     :')
+        print(df.dtypes.value_counts())
+
+        def format_percentage(value):
+            return f"{value:.2f}%"
+
+        pd.DataFrame({
+            'Features': df.columns.values,
+            'Data Type': df.dtypes.values,
+            'Data Count': df.count().values,
+            'Negative Value Count': [(df[col] < 0).sum() if df[col].dtype in [int, float] else 0 for col in df.columns],
+            'Negative Value Percentage': [format_percentage((df[col] < 0).sum() / len(df) * 100) if df[col].dtype in [int, float] else '0.00%' for col in df.columns],
+            'Null Value Count': df.isnull().sum().values,
+            'Null Value Percentage': [format_percentage(val / len(df) * 100) for val in df.isnull().sum().values],
+            'Number of Unique Value': df.nunique().values,
+            'Unique Value': [df[col].unique() for col in df.columns]
+        })
+
+        numeric_df = df.select_dtypes(include=['float64', 'int64'])
+
+        corr_spearman = numeric_df.corr(method='spearman')
+
+        mask = np.triu(np.ones_like(corr_spearman, dtype=bool))
+
+        sns.heatmap(corr_spearman, cmap='coolwarm', annot=True, fmt=".2f", center=0, linewidths=0.5, mask=mask)
+        plt.title('Spearman Correlation Heatmap of Numeric Columns\n')
+        plt.show()
+
+        categorical_features = ['Employment Type', 'GraduateOrNot', 'FrequentFlyer', 'EverTravelledAbroad']
+
+        vertical_features = ['FrequentFlyer', 'EverTravelledAbroad']
+        horizontal_features = ['Employment Type', 'GraduateOrNot']
+
+        vertical_colors = ['#C39BD3', '#F7DC6F']
+        horizontal_colors = ['#85C1E9', '#F1948A']
+
+        fig, axes = plt.subplots(2, 2, figsize=(24, 14))
+
+        for i, feature in enumerate(vertical_features):
+            ax = sns.countplot(data=df, x=feature, ax=axes[0, i], palette=[vertical_colors[i % len(vertical_colors)]], order=df[feature].value_counts().index)
+            ax.set_title(f'{feature}', size=14)
+            for container in ax.containers:
+                ax.bar_label(container, fmt='%d', fontweight='bold')
+
+        for i, feature in enumerate(horizontal_features):
+            top_15 = df[feature].value_counts().nlargest(15)
+            ax = sns.barplot(x=top_15.values, y=top_15.index, ax=axes[1, i], palette=[horizontal_colors[i % len(horizontal_colors)]])
+            ax.set_title(f'Top 15 {feature}', size=14)
+            for container in ax.containers:
+                ax.bar_label(container, fmt='%d', fontweight='bold')
+
+        plt.tight_layout()
+        plt.show()
+
+        numerical_features = ['Age', 'AnnualIncome', 'FamilyMembers']
+
+        plt.figure(figsize=(15, 5))
+        plotnumber = 1
+
+        colors=['#7DCEA0', '#F1948A']
+
+        for feature in numerical_features:
+            ax = plt.subplot(1, len(numerical_features), plotnumber)
+            median_values = df.groupby('TravelInsurance')[feature].median().reset_index()
+            ax = sns.barplot(x='TravelInsurance', y=feature, data=median_values, palette=colors, ci=None)
+            plt.ylabel(f'{feature}')
+            plt.title(f'Relationship between \nBuy Insurance and {feature}', fontsize=12)
+            for container in ax.containers:
+                ax.bar_label(container, fontweight='bold')
+            plotnumber += 1
+            plt.tight_layout()
+
+        plt.show()
+
+        
+
+        # Define Feature (X) and Target (y)
+        X = df.drop(columns = ['TravelInsurance','ID'])
+        y = df['TravelInsurance']
+
+        # Splitting
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, 
+            y, 
+            stratify = y,
+            test_size = 0.2, 
+            random_state = 42
+        )
+
+        X_train.shape, X_test.shape
+
+        transformer = ColumnTransformer([
+        ('onehotenc', OneHotEncoder(drop = 'first'), ['Employment Type', 'GraduateOrNot', 'FrequentFlyer','EverTravelledAbroad'])
+            # ('binenc', BinaryEncoder(), ['Agency', 'Product Name', 'Destination'])
+        ], remainder='passthrough')
+
+        X_test.to_csv('test_data.csv', index=False)
+
+        scaler = RobustScaler()
+
+        ros = RandomOverSampler(random_state = 42)
+        rus = RandomUnderSampler(random_state = 42)
+        smote = SMOTE(random_state = 42)
+        nmiss = NearMiss()
+
+        X_train.shape,X_test.shape
+
+        X_train_preprocessed = transformer.fit_transform(X_train)
+        X_test_preprocessed = transformer.transform(X_test)
+
+        X_test_preprocessed.shape[1]
+
+        feature_names = list(transformer.transformers_[0][1].get_feature_names_out()) + list(transformer.transformers_[1][1].get_feature_names_out()) + ['Duration', 'Net Sales', 'Commision (in value)', 'Age']
+        feature_names
+
+        # if the features more than 10
+        estimator = RandomForestClassifier(random_state=42)
+
+        n_features_range = range(10, 15)
+
+        selected_features = []
+        scores = []
+
+        for n_features in n_features_range:
+            selector = RFE(estimator, n_features_to_select=n_features, step=1)
+            
+            selector.fit(X_train_preprocessed, y_train)
+            
+            X_train_selected = selector.transform(X_train_preprocessed)
+            
+            cv_scores = cross_val_score(estimator, X_train_selected, y_train, cv=StratifiedKFold(n_splits=5), scoring='recall')
+            mean_score = np.mean(cv_scores)
+            
+            selected_features.append(selector.support_)
+            scores.append(mean_score)
+
+        best_index = np.argmax(scores)
+        best_n_features = n_features_range[best_index]
+
+        selected_feature_indices = np.where(selected_features[best_index])[0]
+
+        selected_features_names = [feature_names[i] for i in selected_feature_indices]
+
+        best_selector = RFE(estimator, n_features_to_select=best_n_features, step=1)
+        best_selector.fit(X_train_preprocessed, y_train)
+        X_train_selected_preprocessed = best_selector.transform(X_train_preprocessed)
+        X_test_selected_preprocessed = best_selector.transform(X_test_preprocessed)
+
+        print(f"Best number of features: {best_n_features}")
+        print("Selected Features:")
+        print(selected_features_names)
+
+
+        logreg = LogisticRegression(random_state = 42)
+        knn = KNeighborsClassifier(n_neighbors = 10)
+
+        # tree-based models
+        dt = DecisionTreeClassifier(random_state = 42)
+        rf = RandomForestClassifier(random_state = 42)
+        adaboost = AdaBoostClassifier(random_state = 42)
+        gradboost = GradientBoostingClassifier(random_state = 42)
+        xgboost = XGBClassifier(random_state = 42)
+
+        # RUS without Feature Selection
+        scoring = {
+            'recall': 'recall',
+            'f1': make_scorer(fbeta_score, beta=1),
+            'roc_auc': 'roc_auc'
+        }
+
+        models = [logreg, knn]
+        metrics = ['recall', 'f1', 'roc_auc']
+
+        results = []
+
+        for model in models:
+            for metric in metrics:
+                pipe_model_with_sampling = ImbPipeline([
+                    ('preprocessing', transformer),
+                    ('scaler', scaler),
+                    ('resample', rus),
+                    ('algorithm', model)
+                ])
+
+                model_cv_with_sampling = cross_val_score(
+                    estimator=pipe_model_with_sampling,
+                    X=X_train,
+                    y=y_train,
+                    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+                    # scoring=scoring[metric],
+                    n_jobs=-1
+                )
+                
+                results.append({
+                    'Model': type(model).__name__,
+                    'Sampling': 'With RUS',
+                    'Metric': metric,
+                    'Mean Score': np.mean(model_cv_with_sampling),
+                    'Std Deviation': np.std(model_cv_with_sampling)
+                })
+
+                pipe_model_without_sampling = ImbPipeline([
+                    ('preprocessing', transformer),
+                    ('scaler', scaler),
+                    ('algorithm', model)
+                ])
+
+                model_cv_without_sampling = cross_val_score(
+                    estimator=pipe_model_without_sampling,
+                    X=X_train,
+                    y=y_train,
+                    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+                    scoring=scoring[metric],
+                    n_jobs=-1
+                )
+                
+                results.append({
+                    'Model': type(model).__name__,
+                    'Sampling': 'Without RUS',
+                    'Metric': metric,
+                    'Mean Score': np.mean(model_cv_without_sampling),
+                    'Std Deviation': np.std(model_cv_without_sampling)
+                })
+
+        results_df = pd.DataFrame(results)
+        results_df.sort_values(by='Mean Score', ascending=False)
+
+        # SMOTE
+        scoring = {
+            'recall': 'recall',
+            'f1': make_scorer(fbeta_score, beta=1),
+            'roc_auc': 'roc_auc'
+        }
+
+        models = [logreg, knn]
+        metrics = ['recall', 'f1', 'roc_auc']
+
+        results = []
+
+        for model in models:
+            for metric in metrics:
+                pipe_model_with_sampling = ImbPipeline([
+                    ('preprocessing', transformer),
+                    ('scaler', scaler),
+                    ('resample', smote),
+                    ('algorithm', model)
+                ])
+
+                model_cv_with_sampling = cross_val_score(
+                    estimator=pipe_model_with_sampling,
+                    X=X_train,
+                    y=y_train,
+                    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+                    scoring=scoring[metric],
+                    n_jobs=-1
+                )
+                
+                results.append({
+                    'Model': type(model).__name__,
+                    'Sampling': 'With SMOTE',
+                    'Metric': metric,
+                    'Mean Score': np.mean(model_cv_with_sampling),
+                    'Std Deviation': np.std(model_cv_with_sampling)
+                })
+
+                pipe_model_without_sampling = ImbPipeline([
+                    ('preprocessing', transformer),
+                    ('scaler', scaler),
+                    ('algorithm', model)
+                ])
+
+                model_cv_without_sampling = cross_val_score(
+                    estimator=pipe_model_without_sampling,
+                    X=X_train,
+                    y=y_train,
+                    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+                    scoring=scoring[metric],
+                    n_jobs=-1
+                )
+                
+                results.append({
+                    'Model': type(model).__name__,
+                    'Sampling': 'Without SMOTE',
+                    'Metric': metric,
+                    'Mean Score': np.mean(model_cv_without_sampling),
+                    'Std Deviation': np.std(model_cv_without_sampling)
+                })
+
+        results_df = pd.DataFrame(results)
+        # results_final_1.append(results_df)
+        results_df.sort_values(by='Mean Score', ascending=False)
+
+        # Near Miss
+        scoring = {
+            'recall': 'recall',
+            'f1': make_scorer(fbeta_score, beta=1),
+            'roc_auc': 'roc_auc'
+        }
+
+        models = [logreg, knn]
+        metrics = ['recall', 'f1', 'roc_auc']
+
+        results = []
+
+        for model in models:
+            for metric in metrics:
+                pipe_model_with_sampling = ImbPipeline([
+                    ('preprocessing', transformer),
+                    ('scaler', scaler),
+                    ('resample', nmiss),
+                    ('algorithm', model)
+                ])
+
+                model_cv_with_sampling = cross_val_score(
+                    estimator=pipe_model_with_sampling,
+                    X=X_train,
+                    y=y_train,
+                    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+                    scoring=scoring[metric],
+                    n_jobs=-1
+                )
+                
+                results.append({
+                    'Model': type(model).__name__,
+                    'Sampling': 'With NMISS',
+                    'Metric': metric,
+                    'Mean Score': np.mean(model_cv_with_sampling),
+                    'Std Deviation': np.std(model_cv_with_sampling)
+                })
+
+                pipe_model_without_sampling = ImbPipeline([
+                    ('preprocessing', transformer),
+                    ('scaler', scaler),
+                    ('algorithm', model)
+                ])
+
+                model_cv_without_sampling = cross_val_score(
+                    estimator=pipe_model_without_sampling,
+                    X=X_train,
+                    y=y_train,
+                    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+                    scoring=scoring[metric],
+                    n_jobs=-1
+                )
+                
+                results.append({
+                    'Model': type(model).__name__,
+                    'Sampling': 'Without NMISS',
+                    'Metric': metric,
+                    'Mean Score': np.mean(model_cv_without_sampling),
+                    'Std Deviation': np.std(model_cv_without_sampling)
+                })
+
+        results_df = pd.DataFrame(results)
+
+        results_df.sort_values(by='Mean Score', ascending=False)
+
+        # Explainable Model Family
+        # ROS
+
+        scoring = {
+            'recall': 'recall',
+            'f1': make_scorer(fbeta_score, beta=1),
+            'roc_auc': 'roc_auc'
+        }
+
+        models = [dt, rf, adaboost, gradboost, xgboost]
+        metrics = ['recall', 'f1', 'roc_auc']
+
+        results = []
+
+        for model in models:
+            for metric in metrics:
+                pipe_model_with_sampling = ImbPipeline([
+                    ('preprocessing', transformer),
+                    ('resample', ros),
+                    ('algorithm', model)
+                ])
+
+                model_cv_with_sampling = cross_val_score(
+                    estimator=pipe_model_with_sampling,
+                    X=X_train,
+                    y=y_train,
+                    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+                    scoring=scoring[metric],
+                    n_jobs=-1
+                )
+                
+                results.append({
+                    'Model': type(model).__name__,
+                    'Sampling': 'With ROS',
+                    'Metric': metric,
+                    'Mean Score': np.mean(model_cv_with_sampling),
+                    'Std Deviation': np.std(model_cv_with_sampling)
+                })
+
+                pipe_model_without_sampling = ImbPipeline([
+                    ('preprocessing', transformer),
+                    ('algorithm', model)
+                ])
+
+                model_cv_without_sampling = cross_val_score(
+                    estimator=pipe_model_without_sampling,
+                    X=X_train,
+                    y=y_train,
+                    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+                    scoring=scoring[metric],
+                    n_jobs=-1
+                )
+                
+                results.append({
+                    'Model': type(model).__name__,
+                    'Sampling': 'Without ROS',
+                    'Metric': metric,
+                    'Mean Score': np.mean(model_cv_without_sampling),
+                    'Std Deviation': np.std(model_cv_without_sampling)
+                })
+
+        results_df = pd.DataFrame(results)
+
+        results_df.sort_values(by='Mean Score', ascending=False)
+
+        # RUS
+        scoring = {
+            'recall': 'recall',
+            'f1': make_scorer(fbeta_score, beta=1),
+            'roc_auc': 'roc_auc'
+        }
+
+        models = [dt, rf, adaboost, gradboost, xgboost]
+        metrics = ['recall', 'f1', 'roc_auc']
+
+        results = []
+
+        for model in models:
+            for metric in metrics:
+                pipe_model_with_sampling = ImbPipeline([
+                    ('preprocessing', transformer),
+                    ('resample', rus),
+                    ('algorithm', model)
+                ])
+
+                model_cv_with_sampling = cross_val_score(
+                    estimator=pipe_model_with_sampling,
+                    X=X_train,
+                    y=y_train,
+                    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+                    scoring=scoring[metric],
+                    n_jobs=-1
+                )
+                
+                results.append({
+                    'Model': type(model).__name__,
+                    'Sampling': 'With RUS',
+                    'Metric': metric,
+                    'Mean Score': np.mean(model_cv_with_sampling),
+                    'Std Deviation': np.std(model_cv_with_sampling)
+                })
+
+                pipe_model_without_sampling = ImbPipeline([
+                    ('preprocessing', transformer),
+                    ('algorithm', model)
+                ])
+
+                model_cv_without_sampling = cross_val_score(
+                    estimator=pipe_model_without_sampling,
+                    X=X_train,
+                    y=y_train,
+                    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+                    scoring=scoring[metric],
+                    n_jobs=-1
+                )
+                
+                results.append({
+                    'Model': type(model).__name__,
+                    'Sampling': 'Without RUS',
+                    'Metric': metric,
+                    'Mean Score': np.mean(model_cv_without_sampling),
+                    'Std Deviation': np.std(model_cv_without_sampling)
+                })
+
+        results_df = pd.DataFrame(results)
+
+        results_df.sort_values(by='Mean Score', ascending=False)
+
+        # SMOTE
+        scoring = {
+            'recall': 'recall',
+            'f1': make_scorer(fbeta_score, beta=1),
+            'roc_auc': 'roc_auc'
+        }
+
+        models = [dt, rf, adaboost, gradboost, xgboost]
+        metrics = ['recall', 'f1', 'roc_auc']
+
+        results = []
+
+        for model in models:
+            for metric in metrics:
+                pipe_model_with_sampling = ImbPipeline([
+                    ('preprocessing', transformer),
+                    ('resample', smote),
+                    ('algorithm', model)
+                ])
+
+                model_cv_with_sampling = cross_val_score(
+                    estimator=pipe_model_with_sampling,
+                    X=X_train,
+                    y=y_train,
+                    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+                    scoring=scoring[metric],
+                    n_jobs=-1
+                )
+                
+                results.append({
+                    'Model': type(model).__name__,
+                    'Sampling': 'With SMOTE',
+                    'Metric': metric,
+                    'Mean Score': np.mean(model_cv_with_sampling),
+                    'Std Deviation': np.std(model_cv_with_sampling)
+                })
+
+                pipe_model_without_sampling = ImbPipeline([
+                    ('preprocessing', transformer),
+                    ('algorithm', model)
+                ])
+
+                model_cv_without_sampling = cross_val_score(
+                    estimator=pipe_model_without_sampling,
+                    X=X_train,
+                    y=y_train,
+                    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+                    scoring=scoring[metric],
+                    n_jobs=-1
+                )
+                
+                results.append({
+                    'Model': type(model).__name__,
+                    'Sampling': 'Without SMOTE',
+                    'Metric': metric,
+                    'Mean Score': np.mean(model_cv_without_sampling),
+                    'Std Deviation': np.std(model_cv_without_sampling)
+                })
+
+        results_df = pd.DataFrame(results)
+
+        results_df.sort_values(by='Mean Score', ascending=False)
+
+        # Near Miss
+        scoring = {
+            'recall': 'recall',
+            'f1': make_scorer(fbeta_score, beta=1),
+            'roc_auc': 'roc_auc'
+        }
+
+        models = [dt, rf, adaboost, gradboost, xgboost]
+        metrics = ['recall', 'f1', 'roc_auc']
+
+        results = []
+
+        for model in models:
+            for metric in metrics:
+                pipe_model_with_sampling = ImbPipeline([
+                    ('preprocessing', transformer),
+                    ('resample', nmiss),
+                    ('algorithm', model)
+                ])
+
+                model_cv_with_sampling = cross_val_score(
+                    estimator=pipe_model_with_sampling,
+                    X=X_train,
+                    y=y_train,
+                    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+                    scoring=scoring[metric],
+                    n_jobs=-1
+                )
+                
+                results.append({
+                    'Model': type(model).__name__,
+                    'Sampling': 'With NMISS',
+                    'Metric': metric,
+                    'Mean Score': np.mean(model_cv_with_sampling),
+                    'Std Deviation': np.std(model_cv_with_sampling)
+                })
+
+                pipe_model_without_sampling = ImbPipeline([
+                    ('preprocessing', transformer),
+                    ('algorithm', model)
+                ])
+
+                model_cv_without_sampling = cross_val_score(
+                    estimator=pipe_model_without_sampling,
+                    X=X_train,
+                    y=y_train,
+                    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+                    scoring=scoring[metric],
+                    n_jobs=-1
+                )
+                
+                results.append({
+                    'Model': type(model).__name__,
+                    'Sampling': 'Without NMISS',
+                    'Metric': metric,
+                    'Mean Score': np.mean(model_cv_without_sampling),
+                    'Std Deviation': np.std(model_cv_without_sampling)
+                })
+
+        results_df = pd.DataFrame(results)
+
+        results_df.sort_values(by='Mean Score', ascending=False)
+
+        models = [dt, rf, adaboost, gradboost, xgboost]
+
+        recall_test_without_feature_selection2 = []
+        recall_train_without_feature_selection2 = []
+        recall_valmean_without_feature_selection2 = []
+        recall_valstd_without_feature_selection2 = []
+
+        f1_test_without_feature_selection2 = []
+        f1_train_without_feature_selection2 = []
+        f1_valmean_without_feature_selection2 = []
+        f1_valstd_without_feature_selection2 = []
+
+        for model in models:
+            estimator = ImbPipeline([
+                ('preprocessing', transformer),
+                # ('sample', nmiss),
+                ('algorithm', model)
+            ])
+            
+            estimator.fit(X_train, y_train)
+            
+            recall_cv_score = cross_val_score(
+                    estimator=estimator,
+                    X=X_train,
+                    y=y_train,
+                    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+                    scoring='recall',
+                    n_jobs=-1
+                )
+
+            f1_cv_score = cross_val_score(
+                    estimator=estimator,
+                    X=X_train,
+                    y=y_train,
+                    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+                    scoring= make_scorer(fbeta_score, beta=1),
+                    n_jobs=-1
+                )
+
+            y_pred_test = estimator.predict(X_test)
+            y_pred_train = estimator.predict(X_train)
+            
+            recall_test_score = recall_score(y_test, y_pred_test)
+            recall_test_without_feature_selection2.append(recall_test_score)
+            
+            recall_train_score = recall_score(y_train, y_pred_train)
+            recall_train_without_feature_selection2.append(recall_train_score)
+            
+            recall_valmean_without_feature_selection2.append(recall_cv_score.mean())
+            recall_valstd_without_feature_selection2.append(recall_cv_score.std())
+            
+            f1_test_score = fbeta_score(y_test, y_pred_test, beta=1)
+            f1_test_without_feature_selection2.append(f1_test_score)
+            
+            f1_train_score = fbeta_score(y_train, y_pred_train, beta=1)
+            f1_train_without_feature_selection2.append(f1_train_score)
+            
+            f1_valmean_without_feature_selection2.append(f1_cv_score.mean())
+            f1_valstd_without_feature_selection2.append(f1_cv_score.std())
+
+
+        pd.DataFrame({'model without feature selection':['DecisionTreeClassifier', 'RandomForestClassifier', 'AdaBoostClassifier', 'GradientBoostingClassifier', 'XGBClassifier'],
+                        'recall score (train set)': recall_train_without_feature_selection2,
+                        'recall score (test set)': recall_test_without_feature_selection2,
+                        'recall score (val set mean)': recall_valmean_without_feature_selection2,
+                        'recall score (val set std)': recall_valstd_without_feature_selection2,
+                        'f1 score (train set)': f1_train_without_feature_selection2,
+                        'f1 score (test set)': f1_test_without_feature_selection2,
+                        'f1 score (val set mean)': f1_valmean_without_feature_selection2,
+                        'f1 score (val set std)': f1_valstd_without_feature_selection2
+        }).set_index('model without feature selection').sort_values(by=['recall score (test set)', 'f1 score (test set)'], ascending=False).reset_index()
+
+
+        hyperparam_grid_gb_wofs = {
+            'algorithm__n_estimators': [50, 100, 200],
+            'algorithm__learning_rate': [0.01, 0.1, 0.2],
+            'algorithm__max_depth': [3, 5, 7],
+        }
+
+        # hyperparam_grid_gb_wofs = {
+        #     'algorithm__n_estimators': [25,50,100,200,300],
+        #     'algorithm__max_depth': [3,5,7,9],
+        #     'algorithm__learning_rate': [0.01,0.1,0.2,0.3,0.4,0.5]
+        # }
+
+        # nmiss = NearMiss()
+        gradboost = GradientBoostingClassifier(random_state = 42)
+        pipe_model = ImbPipeline ([
+                    ('preprocessing', transformer),
+                    # ('balance', nmiss),
+                    ('algorithm', xgboost)
+        ])
+
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+        grid_search_gb_wofs = GridSearchCV(
+            pipe_model,
+            param_grid = hyperparam_grid_gb_wofs, 
+            cv = skf,
+            scoring = 'f1',
+            n_jobs = -1
+        )
+
+        model_tuned_gb_wofs = grid_search_gb_wofs.fit(X_train, y_train)
+        model_tuned_gb_wofs
+
+        best_tuning_gb_wofs = model_tuned_gb_wofs.best_estimator_
+
+        print('Best Score:', model_tuned_gb_wofs.best_score_)
+        print('Best Params:', model_tuned_gb_wofs.best_params_)
+
+        # Before Tuning
+        estimator = ImbPipeline([
+            ('preprocessing', transformer),
+            # ('sample', nmiss),
+            ('algorithm', gradboost)
+        ])
+            
+        estimator.fit(X_train,y_train)
+
+        y_pred_test = estimator.predict(X_test)
+        y_pred_train = estimator.predict(X_train)
+
+        print('Train Score Before Tuning (Recall):', recall_score(y_train, y_pred_train))
+        print('Test Score Before Tuning (Recall):', recall_score(y_test, y_pred_test))
+
+        print('Train Score Before Tuning (F1 Score):', fbeta_score(y_train, y_pred_train, beta=1))
+        print('Test Score Before Tuning (F1 Score):', fbeta_score(y_test, y_pred_test, beta=1))
+
+        print(classification_report(y_test,y_pred_test))
+        
+        roc_auc_score(y_test,y_pred_test)
+
+        best_tuning_gb_wofs.fit(X_train, y_train)
+        Y_pred_train = best_tuning_gb_wofs.predict(X_train)
+        Y_pred_test = best_tuning_gb_wofs.predict(X_test)
+
+        print('Train Score After Tuning (Recall):', recall_score(y_train,Y_pred_train))
+        print('Test Score After Tuning (Recall):', recall_score(y_test,Y_pred_test))
+
+        print('Train Score After Tuning (F1 Score):', fbeta_score(y_train, Y_pred_train, beta=1))
+        print('Test Score After Tuning (F1 Score):', fbeta_score(y_test, Y_pred_test, beta=1))
+
+        print(classification_report(y_test, Y_pred_test))
+
+        roc_auc_score(y_test,Y_pred_test)
+
+        plt.figure(figsize=(20,5))
+
+        plt.subplot(1,2,1)
+        sns.heatmap(confusion_matrix(y_test, y_pred_test),annot=True,fmt='.0f')
+        plt.xlabel('Predicted Label')
+        plt.ylabel('True Label')
+        plt.title('Grid Xgboost Without Feature Selection Before Tuning')
+
+        plt.subplot(1,2,2)
+        sns.heatmap(confusion_matrix(y_test, Y_pred_test),annot=True,fmt='.0f')
+        plt.xlabel('Predicted Label')
+        plt.ylabel('True Label')
+        plt.title('Grid Xgboost Without Feature Selection After Tuning')
+
+        # best model: default parameter gradboost model
+        final_model = estimator
+        final_model[-1]
+
+        print(classification_report(y_test, y_pred_test))
+
+        plt.figure(figsize=(7,5))
+
+        sns.heatmap(confusion_matrix(y_test, y_pred_test),annot=True,fmt='.0f')
+        plt.xlabel('Predicted Label')
+        plt.ylabel('True Label')
+        plt.title('Grid Xgboost Without Feature Selection Before Tuning')
+
+        
+
+        final_model.fit(X_train, y_train)
+
+        perm_importance = permutation_importance(final_model, X_test, y_test, n_repeats=10, random_state=42)
+
+        perm_importance_df = pd.DataFrame({
+            'Feature': X.columns,
+            'Importance Mean': perm_importance.importances_mean,
+            'Importance Std': perm_importance.importances_std
+        })
+
+        perm_importance_df = perm_importance_df.sort_values(by='Importance Mean', ascending=False)
+        perm_importance_df
+
+        plt.figure(figsize=(10, 6))
+        plt.barh(perm_importance_df['Feature'], perm_importance_df['Importance Mean'], color='green')
+        plt.xlabel('Permutation Importance Mean')
+        plt.title('Permutation Importance')
+        plt.gca().invert_yaxis()
+        plt.show()
+
+        
+
+        features = list(transformer.get_feature_names_out())
+
+        list_feature_names = []
+
+        for feature in features:
+            list_feature_names.append('_'.join(feature.split('_')[2:]))
+
+        display(f"Number of features: {len(list_feature_names)}", list_feature_names)
+
+        X_test_preprocessed = pd.DataFrame(final_model[0].transform(X_test))
+        X_test_preprocessed.columns = list_feature_names
+        X_test_preprocessed
+
+        explainer = lime_tabular.LimeTabularExplainer(
+            training_data = final_model[0].transform(X_train),
+            feature_names = list_feature_names,
+            class_names = ['Not Buy','Buy'],
+            mode = 'classification'
+        )
+
+        explainer
+
+        X_test_preprocessed[0:1]
+
+        i = 1
+
+        print(f"The PREDICTED purchase insurance status of this customer is: {('BUY' if Y_pred_test[i] == 1 else 'DID NOT BUY')} --> from Y_pred\n")
+        print(f"The ACTUAL purchase insurance status of this customer is: {('BUY' if y_test.iloc[i] == 1 else 'DID NOT BUY')} --> from y_test\n")
+
+        exp = explainer.explain_instance(
+            X_test_preprocessed.iloc[i],
+            final_model['algorithm'].predict_proba,
+        )
+
+        exp.show_in_notebook(show_table=True)
+
+        i = 91
+
+        print(f"The PREDICTED purchase insurance status of this customer is: {('BUY' if Y_pred_test[i] == 1 else 'DID NOT BUY')} --> from Y_pred\n")
+        print(f"The ACTUAL purchase insurance status of this customer is: {('BUY' if y_test.iloc[i] == 1 else 'DID NOT BUY')} --> from y_test\n")
+
+        exp = explainer.explain_instance(
+            X_test_preprocessed.iloc[i],
+            final_model['algorithm'].predict_proba,
+        )
+
+        exp.show_in_notebook(show_table=True)
+
+        # show threshold for each features
+        exp.as_list()
+
+        import pickle
+
+        final_model = estimator
+        final_model.fit(X_train, y_train)
+
+        with open(os.path.join(model_path,'Travel_Insurance_XGBoost_Model.sav'),'wb') as model_file:
+            pickle.dump(final_model, model_file)
+        print('Training complete.')
+    except Exception as e:
+        # Write out an error file. This will be returned as the failureReason in the
+        # DescribeTrainingJob result.
+        trc = traceback.format_exc()
+        with open(os.path.join(output_path, 'failure'), 'w') as s:
+            s.write('Exception during training: ' + str(e) + '\n' + trc)
+        # Printing this causes the exception to be in the training job logs, as well.
+        print('Exception during training: ' + str(e) + '\n' + trc, file=sys.stderr)
+        # A non-zero exit code causes the training job to be marked as Failed.
+        sys.exit(255)
+if __name__ == '__main__':
+    train()
+
+    # A zero exit code causes the job to be marked a Succeeded.
+    sys.exit(0)

@@ -3,7 +3,7 @@
 # for serving inferences in a stable way.
 
 FROM ubuntu:latest
-ENV CONDA_DIR /opt/conda
+ENV CONDA_DIR=/opt/conda
 
 RUN apt-get -y update && apt-get install -y --no-install-recommends \
          wget \
@@ -18,7 +18,6 @@ RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86
 ENV PATH=$CONDA_DIR/bin:$PATH
 
 RUN ln -s /usr/bin/python3 /usr/bin/python
-RUN ln -s /usr/bin/pip3 /usr/bin/pip
 
 # Here we get all python packages.
 # There's substantial overlap between scipy and numpy that we eliminate by
@@ -32,8 +31,12 @@ RUN pip --no-cache-dir install \
     pandas \
     xgboost==2.1.4 \
     scikit-learn==1.5.2 \
+    matplotlib==3.10.1 \
+    seaborn==0.13.2 \
+    ipython==8.34.0 \
+    lime==0.2.0.1 \
     && conda install -y imbalanced-learn \
-    && conda clean -ya \
+    && conda clean -ya 
 # Set some environment variables. PYTHONUNBUFFERED keeps Python from buffering our standard
 # output stream, which means that logs can be delivered to the user quickly. PYTHONDONTWRITEBYTECODE
 # keeps Python from writing the .pyc files which are unnecessary in this case. We also update
